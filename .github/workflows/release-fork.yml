@@ -1,0 +1,74 @@
+# Fork release: push a tag `intel-v<version>` (version = Cargo.toml) and a
+# GitHub Release gets Herdr-<version>-macos-x86_64.zip. Upstream's release.yml
+# and ci.yml are disabled in this fork (gh workflow disable); see RELEASING-FORK.md.
+name: fork release
+run-name: ${{ github.ref_type == 'tag' && format('release {0}', github.ref_name) || format('build {0}', github.ref_name) }}
+
+on:
+  push:
+    tags: ["intel-v*"]
+  # Builds only; publishing needs a tag.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: 1.95.0
+  ZIG_VERSION: 0.16.0
+
+jobs:
+  build:
+    # Intel macOS runner.
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Restore build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: fork-macos-x86_64-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            fork-macos-x86_64-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
+      - name: Version matches the tag
+        if: github.ref_type == 'tag'
+        run: |
+          want="intel-v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [ "$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $want"; exit 1; }
+      - name: Build and pack
+        run: scripts/package-macos-zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: herdr-macos-x86_64
+          path: dist-fork/*.zip
+          if-no-files-found: error
+          retention-days: 7
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist-fork/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Herdr ${GITHUB_REF_NAME#intel-v} (macOS Intel)" \
+            --notes "Intel (x86_64) build, ad-hoc signed, not notarized. After download run: xattr -dr com.apple.quarantine Herdr.app"
